@@ -1,10 +1,16 @@
-from datetime import datetime
+from datetime import datetime, timezone
+import logging
 from typing import Any
 from email_validator import EmailNotValidError, validate_email
 from sqlalchemy.orm import Session
 
+from app.config import settings
+from app.db import SessionLocal
 from app.models import Certificate, CertificateStatus, Job, JobStatus
 from app.schemas import JobCreateRequest
+from app.services import pdf_service
+
+logger = logging.getLogger(__name__)
 
 
 def create_job(db: Session, request: JobCreateRequest) -> Job:
@@ -86,7 +92,104 @@ def validate_recipient(cert: Any) -> None:
 
 def process_job(job_id: str) -> None:
     """
-    Background job processing placeholder for CP2.
-    Full processing algorithm will be implemented in CP3.
+    Background job processing algorithm per spec section 9:
+    - Opens its OWN DB session (never reuses the request session).
+    - job.status = processing; commit.
+    - Iterates over pending certificates ordered by created_at.
+    - Commits after EACH certificate.
+    - Derives final job status and sets completed_at.
+    - Wrapped in try/finally so the job is never left stuck in processing.
+    - Re-runnable: only processes certificates with status == pending.
     """
-    pass
+    # Open dedicated DB session
+    from app.db import SessionLocal as DBSessionLocal
+    db = DBSessionLocal()
+    try:
+        job = db.query(Job).filter_by(id=job_id).first()
+        if not job:
+            logger.error("Job %s not found for processing", job_id)
+            return
+
+        job.status = JobStatus.PROCESSING
+        db.commit()
+
+        pending_certs = (
+            db.query(Certificate)
+            .filter_by(job_id=job.id, status=CertificateStatus.PENDING)
+            .order_by(Certificate.created_at.asc())
+            .all()
+        )
+
+        for cert in pending_certs:
+            cert.status = CertificateStatus.PROCESSING
+            db.commit()
+
+            try:
+                validate_recipient(cert)
+                out_path = settings.STORAGE_DIR / job.id / f"{cert.id}.pdf"
+                pdf_service.render_certificate(cert, job.event_name, out_path)
+                cert.status = CertificateStatus.SUCCESS
+                cert.file_path = str(out_path)
+                cert.error_message = None
+                job.succeeded += 1
+            except Exception as exc:
+                cert.status = CertificateStatus.FAILED
+                cert.error_message = str(exc)
+                job.failed += 1
+                logger.exception("Error processing certificate %s for job %s", cert.id, job_id)
+            finally:
+                db.commit()
+
+        # Update and derive final job status
+        succeeded_count = (
+            db.query(Certificate)
+            .filter_by(job_id=job.id, status=CertificateStatus.SUCCESS)
+            .count()
+        )
+        failed_count = (
+            db.query(Certificate)
+            .filter_by(job_id=job.id, status=CertificateStatus.FAILED)
+            .count()
+        )
+        job.succeeded = succeeded_count
+        job.failed = failed_count
+
+        if job.succeeded == job.total:
+            job.status = JobStatus.COMPLETED
+        elif job.failed == job.total:
+            job.status = JobStatus.FAILED
+        else:
+            job.status = JobStatus.COMPLETED_WITH_ERRORS
+
+        job.completed_at = datetime.now(timezone.utc)
+        db.commit()
+
+    except Exception:
+        logger.exception("Unexpected error in process_job for job %s", job_id)
+        try:
+            job = db.query(Job).filter_by(id=job_id).first()
+            if job and job.status == JobStatus.PROCESSING:
+                succeeded_count = (
+                    db.query(Certificate)
+                    .filter_by(job_id=job.id, status=CertificateStatus.SUCCESS)
+                    .count()
+                )
+                failed_count = (
+                    db.query(Certificate)
+                    .filter_by(job_id=job.id, status=CertificateStatus.FAILED)
+                    .count()
+                )
+                job.succeeded = succeeded_count
+                job.failed = failed_count
+                if job.succeeded > 0 and job.failed > 0:
+                    job.status = JobStatus.COMPLETED_WITH_ERRORS
+                elif job.succeeded > 0 and job.failed == 0:
+                    job.status = JobStatus.COMPLETED
+                else:
+                    job.status = JobStatus.FAILED
+                job.completed_at = datetime.now(timezone.utc)
+                db.commit()
+        except Exception:
+            logger.exception("Failed to recover final status for job %s", job_id)
+    finally:
+        db.close()

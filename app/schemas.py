@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Optional
 from pydantic import BaseModel, ConfigDict, StrictStr, field_validator
 
@@ -39,3 +40,24 @@ class JobCreateResponse(BaseModel):
     job_id: str
     status: str
     total: int
+
+
+class CertificateItemResponse(BaseModel):
+    id: str
+    recipient_name: str
+    status: str
+    error_message: Optional[str] = None
+    download_url: Optional[str] = None
+
+
+class JobDetailResponse(BaseModel):
+    job_id: str
+    event_name: str
+    status: str
+    total: int
+    succeeded: int
+    failed: int
+    pending: int
+    created_at: datetime
+    completed_at: Optional[datetime] = None
+    certificates: list[CertificateItemResponse]
