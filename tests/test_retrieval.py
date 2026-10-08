@@ -182,3 +182,40 @@ def test_download_zip_unknown_job_returns_404(client, auth_headers):
     )
     assert res.status_code == 404
     assert res.json()["detail"] == "Job not found"
+
+
+def test_download_endpoints_require_auth(client, auth_headers):
+    payload = {
+        "event_name": "Auth Download Test",
+        "recipients": [{"name": "Asha Rao"}],
+    }
+    create_res = client.post("/v1/jobs", json=payload, headers=auth_headers)
+    job_id = create_res.json()["job_id"]
+    status_res = client.get(f"/v1/jobs/{job_id}", headers=auth_headers)
+    cert_id = status_res.json()["certificates"][0]["id"]
+
+    # 1. Single PDF download without key -> 401
+    res1 = client.get(f"/v1/jobs/{job_id}/certificates/{cert_id}/download")
+    assert res1.status_code == 401
+    assert res1.json() == {"detail": "Invalid or missing API key"}
+
+    # Single PDF download with bad key -> 401
+    res1_bad = client.get(
+        f"/v1/jobs/{job_id}/certificates/{cert_id}/download",
+        headers={"X-API-Key": "wrong-key"},
+    )
+    assert res1_bad.status_code == 401
+    assert res1_bad.json() == {"detail": "Invalid or missing API key"}
+
+    # 2. ZIP download without key -> 401
+    res2 = client.get(f"/v1/jobs/{job_id}/download")
+    assert res2.status_code == 401
+    assert res2.json() == {"detail": "Invalid or missing API key"}
+
+    # ZIP download with bad key -> 401
+    res2_bad = client.get(
+        f"/v1/jobs/{job_id}/download",
+        headers={"X-API-Key": "wrong-key"},
+    )
+    assert res2_bad.status_code == 401
+    assert res2_bad.json() == {"detail": "Invalid or missing API key"}

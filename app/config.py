@@ -1,5 +1,9 @@
 import os
 from pathlib import Path
+from dotenv import load_dotenv
+
+# Load variables from .env file if present
+load_dotenv()
 
 
 class Settings:
